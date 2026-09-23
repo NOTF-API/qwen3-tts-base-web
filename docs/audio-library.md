@@ -64,10 +64,14 @@ URL 响应包含 `status`、`filename`、`url`、`local_path` 和完整的 `clip
 ```bash
 .venv-tools/bin/python -m pytest -q
 node tests/browser_audio_library.cjs
+node tests/browser_recording.cjs
 ```
 
 浏览器测试需要安装 Playwright 与 Chromium，可用 `NODE_PATH` 指定已有的 Playwright 安装，
 用 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定 Chromium 可执行文件。
 它通过模拟 API 验证桌面端生成、播放、失败重试、刷新恢复、编辑、下载确认、离线拒绝、导出和删除。
 后端测试使用临时目录、模拟模型，不访问用户数据或下载模型。
+录音测试使用 Chromium 虚拟麦克风与真实 MediaRecorder 编码，覆盖权限拒绝、延迟授权后取消、
+录音、试听、裁切后的 WAV 上传、重录、时长限制、麦克风释放与文件上传回退；不访问真实麦克风。
+Safari 等其他浏览器及真实麦克风的音质尚需手动验收。
 这些测试不替代 VoiceDesign 在真实 MPS/CUDA 设备上的音质与内存验收。

@@ -536,6 +536,12 @@
             font-style: italic;
         }
 
+        .recorder-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+        .record-time { font-variant-numeric: tabular-nums; min-width: 48px; color: #d9dde1; }
+        .record-state { flex: 1; min-width: 140px; color: #a0a8b0; font-size: 12px; overflow-wrap: anywhere; }
+        .recorder-bar[data-recording="true"] .record-time { color: #f18e8e; }
+        #recordStart { border-color: #744044; color: #f1a2a2; }
+        #drop[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
     </style>
 </head>
 
@@ -548,7 +554,7 @@
                 <a class="nav-link" href="/">语音合成</a>
             </div>
             <p>
-                上传参考音频 → <b>裁切并确认</b> → 填写文本 → 打包成 <code>.pt</code>，存到
+                上传或录制参考音频 → <b>裁切并确认</b> → 填写文本 → 打包成 <code>.pt</code>，存到
                 <code>pt/{角色}/{角色}_{情感}.pt</code>。
                 生成的音色可立即通过 <a href="/docs">API</a> 或 <a href="/">测试页</a> 使用。
             </p>
@@ -557,6 +563,13 @@
         <!-- ============ 01 · 参考音频 ============ -->
         <section class="card">
             <h2>01 · 参考音频</h2>
+            <div class="recorder-bar" id="recorderBar">
+                <button type="button" class="sel-btn" id="recordStart">开始录音</button>
+                <button type="button" class="sel-btn" id="recordStop" disabled>停止录音</button>
+                <button type="button" class="sel-btn" id="recordCancel" disabled>取消录音</button>
+                <span class="record-time" id="recordTime" aria-label="录音时长">00:00</span>
+                <span class="record-state" id="recordStatus" role="status">麦克风就绪 · 最长 2 分钟</span>
+            </div>
 
             <div class="drop" id="drop">
                 <input type="file" id="file" accept="audio/*">
@@ -667,6 +680,8 @@
         const xvecHint = $("xvecHint"), libEl = $("lib");
         const modeBadge = $("modeBadge"), waveHint = $("waveHint");
         const preciseBox = $("preciseBox");
+        const recordStart = $('recordStart'), recordStop = $('recordStop'), recordCancel = $('recordCancel');
+        const recordStatus = $('recordStatus'), recordTime = $('recordTime');
 
         // ============================================================
         // 状态
@@ -675,6 +690,123 @@
         let audioCtx = null;
         let audioBuffer = null;
         let audioName = "";
+        let capture = null;
+        let loadingAudio = false;
+        let loadVersion = 0;
+        let submitting = false;
+        const RECORD_LIMIT = 120;
+
+        function recordingUnavailable() {
+            if (!window.isSecureContext) return '录音需要 HTTPS 或 localhost；当前地址可使用文件上传。';
+            if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return '当前浏览器不支持录音，请使用文件上传。';
+            return '';
+        }
+
+        function releaseCapture(session) {
+            clearInterval(session.timer);
+            session.stream?.getTracks().forEach(track => track.stop());
+        }
+
+        function cancelRecording(message = '已取消录音') {
+            const session = capture;
+            if (!session) return;
+            capture = null;
+            session.cancelled = true;
+            if (session.recorder?.state !== 'inactive' && session.recorder) {
+                try { session.recorder.stop(); } catch (_) { }
+            }
+            releaseCapture(session);
+            recordStatus.textContent = message;
+            updateButtons();
+        }
+
+        function stopRecording() {
+            const session = capture;
+            if (!session || session.recorder?.state !== 'recording') return;
+            session.stopping = true;
+            recordStatus.textContent = '正在整理录音…';
+            try { session.recorder.stop(); }
+            catch (error) { cancelRecording('停止录音失败：' + error.message); }
+            releaseCapture(session);
+            updateButtons();
+        }
+
+        async function startRecording() {
+            if (capture || loadingAudio || submitting) return;
+            const unavailable = recordingUnavailable();
+            if (unavailable) { recordStatus.textContent = unavailable; return; }
+            stopPreview();
+            const session = {chunks: [], stream: null, recorder: null, cancelled: false};
+            capture = session;
+            recordTime.textContent = '00:00';
+            recordStatus.textContent = '等待麦克风授权…';
+            updateButtons();
+            try {
+                session.stream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+                // Permission can resolve after cancel/navigation. Never keep that stream alive.
+                if (capture !== session) { releaseCapture(session); return; }
+                const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus']
+                    .find(type => MediaRecorder.isTypeSupported(type));
+                const recorder = new MediaRecorder(session.stream, mimeType ? {mimeType} : {});
+                session.recorder = recorder;
+                recorder.ondataavailable = event => {
+                    if (!session.cancelled && event.data.size) session.chunks.push(event.data);
+                };
+                recorder.onerror = event => {
+                    if (capture === session) cancelRecording('录音失败：' + (event.error?.message || '设备中断，请重试'));
+                };
+                recorder.onstop = async () => {
+                    releaseCapture(session);
+                    if (capture !== session) return;
+                    session.stopping = true;
+                    recordStatus.textContent = '正在读取录音…';
+                    updateButtons();
+                    try {
+                        const type = recorder.mimeType || session.chunks[0]?.type || 'audio/webm';
+                        const blob = new Blob(session.chunks, {type});
+                        session.chunks.length = 0;
+                        if (!blob.size) throw new Error('未录到音频，请重新录制');
+                        const extension = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+                        const file = new File([blob], 'recording-' + Date.now() + '.' + extension, {type});
+                        const loaded = await loadAudio(file, session);
+                        if (capture === session && loaded) recordStatus.textContent = '录音已就绪 · 待裁切确认';
+                    } catch (error) {
+                        if (capture === session) recordStatus.textContent = '录音处理失败：' + error.message;
+                    } finally {
+                        if (capture === session) capture = null;
+                        updateButtons();
+                    }
+                };
+                session.stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => {
+                    if (capture === session && !session.stopping) stopRecording();
+                }));
+                recorder.start(250);
+                session.started = performance.now();
+                recordStatus.textContent = '录音中';
+                session.timer = setInterval(() => {
+                    const seconds = Math.floor((performance.now() - session.started) / 1000);
+                    recordTime.textContent = String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
+                    if (seconds >= RECORD_LIMIT) stopRecording();
+                }, 200);
+                updateButtons();
+            } catch (error) {
+                releaseCapture(session);
+                if (capture !== session) return;
+                capture = null;
+                const messages = {
+                    NotAllowedError: '麦克风权限被拒绝，请在浏览器站点设置中允许后重试。',
+                    NotFoundError: '没有找到麦克风，请连接设备后重试。',
+                    NotReadableError: '麦克风无法使用，可能被其他应用占用。',
+                };
+                recordStatus.textContent = messages[error.name] || '录音失败：' + error.message;
+                updateButtons();
+            }
+        }
+
+        recordStart.addEventListener('click', startRecording);
+        recordStop.addEventListener('click', stopRecording);
+        recordCancel.addEventListener('click', () => cancelRecording());
+        window.addEventListener('pagehide', () => { cancelRecording(); stopPreview(); });
 
         // 选区（始终针对整段音频的秒数）
         let selection = { start: 0, end: 0 };
@@ -763,14 +895,23 @@
         // 文件加载
         // ============================================================
 
-        async function loadAudio(file) {
+        async function loadAudio(file, session = null) {
+            if (submitting || loadingAudio || (capture && capture !== session)) return false;
+            const version = ++loadVersion;
+            loadingAudio = true;
+            updateButtons();
             try {
                 stopPreview();
                 const ab = await file.arrayBuffer();
                 const ctx = getCtx();
-                if (ctx.state === "suspended") await ctx.resume();
-                audioBuffer = await ctx.decodeAudioData(ab);
+                const decoded = await ctx.decodeAudioData(ab);
+                if (version !== loadVersion || (session && capture !== session)) return false;
+                if (!decoded.length || !Number.isFinite(decoded.duration)) throw new Error('音频为空或无效');
+                audioBuffer = decoded;
                 audioName = file.name;
+                statusEl.textContent = '';
+                statusEl.className = 'status';
+                if (!session) recordStatus.textContent = recordingUnavailable() || '已载入音频文件';
 
                 selection.start = 0;
                 selection.end = audioBuffer.duration;
@@ -787,14 +928,22 @@
                 syncInputsFromSel();
                 setMode(false);
                 updateButtons();
+                return true;
             } catch (e) {
                 console.error(e);
-                alert("音频解码失败：" + e.message);
-                resetAll();
+                if (session) {
+                    if (capture === session) recordStatus.textContent = '录音解码失败：' + e.message;
+                } else setStatus('音频解码失败：' + e.message, 'err');
+                return false;
+            } finally {
+                loadingAudio = false;
+                updateButtons();
             }
         }
 
         function resetAll() {
+            if (capture || loadingAudio || submitting) return;
+            ++loadVersion;
             stopPreview();
             audioBuffer = null;
             audioName = "";
@@ -987,7 +1136,7 @@
         const HANDLE_HIT = 12;
 
         canvas.addEventListener("pointerdown", (e) => {
-            if (!audioBuffer || cropLocked) return;
+            if (!audioBuffer || cropLocked || capture || loadingAudio || submitting) return;
             e.preventDefault();
             canvas.setPointerCapture(e.pointerId);
 
@@ -1013,7 +1162,7 @@
         });
 
         canvas.addEventListener("pointermove", (e) => {
-            if (!audioBuffer) return;
+            if (!audioBuffer || capture || loadingAudio || submitting) return;
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const W = rect.width;
@@ -1184,7 +1333,9 @@
         // 拖放 / 选择文件
         // ============================================================
 
-        drop.addEventListener("click", () => fileInput.click());
+        drop.addEventListener("click", (event) => {
+            if (event.target !== fileInput && !capture && !loadingAudio && !submitting) fileInput.click();
+        });
         fileInput.addEventListener("change", (e) => {
             if (e.target.files[0]) loadAudio(e.target.files[0]);
         });
@@ -1267,12 +1418,23 @@
 
         function updateButtons() {
             const hasAudio = !!audioBuffer;
-            previewBtn.disabled = !hasAudio;
-            resetBtn.disabled = !hasAudio || cropLocked;
-            confirmBtn.disabled = !hasAudio || cropLocked;
+            const busy = !!capture || loadingAudio || submitting;
+            recordStart.disabled = busy || !!recordingUnavailable();
+            recordStop.disabled = !capture || capture.recorder?.state !== 'recording' || capture.stopping;
+            recordCancel.disabled = !capture;
+            $('recorderBar').dataset.recording = String(!!capture && capture.recorder?.state === 'recording');
+            fileInput.disabled = busy;
+            drop.setAttribute('aria-disabled', String(busy));
+            clearBtn.disabled = busy;
+            editBtn.disabled = busy;
+            previewBtn.disabled = busy || !hasAudio;
+            resetBtn.disabled = busy || !hasAudio || cropLocked;
+            confirmBtn.disabled = busy || !hasAudio || cropLocked;
+            startIn.disabled = busy || cropLocked;
+            endIn.disabled = busy || cropLocked;
 
             // 只有锁定后才允许提交
-            submitBtn.disabled = !(hasAudio && cropLocked &&
+            submitBtn.disabled = busy || !(hasAudio && cropLocked &&
                 roleInput.value.trim());
         }
 
@@ -1298,6 +1460,7 @@
         // ============================================================
 
         submitBtn.addEventListener("click", async () => {
+            if (capture || loadingAudio || submitting) return;
             const role = roleInput.value.trim();
             const emotion = emotionInput.value.trim() || "平静";
             const refText = refTextInput.value.trim();
@@ -1306,7 +1469,7 @@
             if (!cropLocked) { setStatus("请先确认裁切", "err"); return; }
             if (!validName(role)) { setStatus("角色名只能包含字母/数字/中文/下划线/横线，1-30 字符", "err"); return; }
             if (!validName(emotion)) { setStatus("情感名只能包含字母/数字/中文/下划线/横线，1-30 字符", "err"); return; }
-            if (!audioBuffer) { setStatus("请先上传音频", "err"); return; }
+            if (!audioBuffer) { setStatus("请先上传或录制音频", "err"); return; }
 
             stopPreview();
 
@@ -1321,7 +1484,8 @@
             const dur = selection.end - selection.start;
             const selName = (audioName.replace(/\.[^.]+$/, "") || "clip") + "_clip.wav";
 
-            submitBtn.disabled = true;
+            submitting = true;
+            updateButtons();
             setStatus("步骤 1/2：上传裁切后的音频（" + dur.toFixed(2) + " 秒，" +
                 fmtSize(wavBlob.size) + "）…", "");
 
@@ -1335,6 +1499,7 @@
                 audioPath = data.path;
             } catch (e) {
                 setStatus("上传失败：" + e.message, "err");
+                submitting = false;
                 updateButtons();
                 return;
             }
@@ -1380,6 +1545,7 @@
             } catch (e) {
                 setStatus("生成失败：" + e.message, "err");
             } finally {
+                submitting = false;
                 updateButtons();
             }
         });
@@ -1428,6 +1594,7 @@
             resizeTimer = setTimeout(() => { if (audioBuffer) drawWaveform(); }, 80);
         });
 
+        if (recordingUnavailable()) recordStatus.textContent = recordingUnavailable();
         loadLib();
         updateSelInfo();
         updateButtons();
