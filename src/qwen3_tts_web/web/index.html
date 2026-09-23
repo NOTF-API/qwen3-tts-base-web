@@ -757,7 +757,8 @@
         </div>
         <div class="field">
           <label for="genEmotion">情绪（选填）</label>
-          <select id="genEmotion"></select>
+          <input type="text" id="genEmotion" list="genEmotionOptions" placeholder="默认 · 平静" maxlength="30" autocomplete="off">
+          <datalist id="genEmotionOptions"></datalist>
         </div>
         </div>
         <div id="designFields" role="tabpanel" aria-labelledby="designTab" hidden>
@@ -899,9 +900,10 @@
   <dialog id="editDialog" aria-labelledby="editHeading">
     <form id="editForm">
       <h2 id="editHeading">编辑语音</h2>
-      <div class="field"><label for="editTitle">名称</label><input id="editTitle" maxlength="200"></div>
+      <div class="field"><label for="editTitle">名称</label><input type="text" id="editTitle" maxlength="200"></div>
       <div class="field"><label for="editText">台词</label><textarea id="editText" maxlength="10000"></textarea></div>
       <div class="field"><label for="editLanguage">语言</label><select id="editLanguage"></select></div>
+      <div class="field" id="editEmotionField"><label for="editEmotion">情绪（选填）</label><input type="text" id="editEmotion" list="editEmotionOptions" placeholder="默认 · 平静" maxlength="30" autocomplete="off"><datalist id="editEmotionOptions"></datalist></div>
       <div class="field" id="editInstructField"><label for="editInstruct">音色描述</label><textarea id="editInstruct" maxlength="2000"></textarea></div>
       <div class="gen-status" id="editStatus" role="status"></div>
       <div class="actions"><button type="button" class="tool-btn" id="cancelEdit">取消</button><button class="tool-btn primary" id="saveEdit" type="submit">保存</button></div>
@@ -1301,6 +1303,9 @@
       $('editText').value = clip.text || '';
       $('editLanguage').innerHTML = genLanguage.innerHTML;
       $('editLanguage').value = clip.language;
+      $('editEmotion').value = clip.emotion || '';
+      fillEmotionOptions($('editEmotionOptions'), clip.role);
+      $('editEmotionField').hidden = clip.synthesis_mode === 'design';
       $('editInstruct').value = clip.instruct || '';
       $('editInstructField').hidden = clip.synthesis_mode !== 'design';
       $('editStatus').textContent = '';
@@ -1919,7 +1924,7 @@
     // 列表渲染
     // ============================================================
     function isDirty(clip) {
-      if (!clip.url) return false;
+      if (!clip.url || clip.synthesis_mode === 'legacy') return false;
       return clip.role !== clip.generatedRole
         || clip.emotion !== clip.generatedEmotion
         || clip.text !== clip.generatedText
@@ -2014,24 +2019,28 @@
       roleEl.disabled = locked || design || legacy;
       roleEl.addEventListener("change", () => {
         clip.role = roleEl.value;
-        // 重建情感下拉
-        rebuildEmotionSelect(emoEl, clip.role, clip.emotion);
-        const emos = rolesData[clip.role] || [];
-        if (!emos.includes(clip.emotion) && emos.length > 0) {
-          clip.emotion = emos.includes("平静") ? "平静" : emos[0];
-          emoEl.value = clip.emotion;
-        }
+        fillEmotionOptions(emoOptions, clip.role);
         applyRoleColorVars(row, clip.role);
         refreshRowDirtyState(row, clip, textEl, regenIco);
       });
 
       // ---- 情感 ----
-      const emoEl = document.createElement("select");
-      emoEl.className = "cell-select emo-select";
-      rebuildEmotionSelect(emoEl, clip.role, clip.emotion);
-      emoEl.disabled = locked || design || legacy;
+      const emoEl = document.createElement("input");
+      emoEl.type = 'text';
+      emoEl.className = "cell-input emo-select";
+      emoEl.setAttribute('aria-label', '情绪');
+      emoEl.placeholder = '默认 · 平静';
+      emoEl.maxLength = 30;
+      emoEl.autocomplete = 'off';
+      emoEl.value = clip.emotion || '';
+      const emoOptions = document.createElement('datalist');
+      emoOptions.id = 'emotion-options-' + clip.id;
+      emoEl.setAttribute('list', emoOptions.id);
+      fillEmotionOptions(emoOptions, clip.role);
+      emoEl.disabled = locked || design;
       emoEl.addEventListener("change", () => {
-        clip.emotion = emoEl.value;
+        clip.emotion = emoEl.value.trim() || '平静';
+        emoEl.value = clip.emotion;
         refreshRowDirtyState(row, clip, textEl, regenIco);
       });
 
@@ -2174,11 +2183,23 @@
       row.appendChild(idxEl);
       row.appendChild(roleEl);
       if (design) {
-        const prompt = document.createElement('button');
-        prompt.className = 'cell-input design-label prompt-cell'; prompt.textContent = '音色描述';
+        const prompt = document.createElement('input');
+        prompt.type = 'text';
+        prompt.className = 'cell-input design-label prompt-cell';
+        prompt.setAttribute('aria-label', '音色描述');
+        prompt.value = clip.instruct || '';
+        prompt.maxLength = 2000;
         prompt.title = clip.instruct; prompt.disabled = locked;
-        prompt.onclick = () => openEdit(clip); row.appendChild(prompt);
-      } else row.appendChild(emoEl);
+        prompt.addEventListener('change', () => {
+          clip.instruct = prompt.value.trim();
+          prompt.title = clip.instruct;
+          refreshRowDirtyState(row, clip, textEl, regenIco);
+        });
+        row.appendChild(prompt);
+      } else {
+        row.appendChild(emoEl);
+        row.appendChild(emoOptions);
+      }
       row.appendChild(info);
       row.appendChild(spEl);
       row.appendChild(sgEl);
@@ -2201,18 +2222,8 @@
       saveClip(clip);
     }
 
-    function rebuildEmotionSelect(selectEl, role, selected) {
-      const emos = (rolesData[role] || []).slice();
-      if (selected && !emos.includes(selected)) emos.push(selected);
-      if (emos.length === 0) emos.push("平静");
-
-      selectEl.innerHTML = "";
-      emos.forEach(e => {
-        const o = document.createElement("option");
-        o.value = e; o.textContent = e;
-        if (e === selected) o.selected = true;
-        selectEl.appendChild(o);
-      });
+    function fillEmotionOptions(list, role) {
+      list.replaceChildren(...(rolesData[role] || []).map(emotion => new Option(emotion, emotion)));
     }
 
     // ============================================================
@@ -2324,15 +2335,13 @@
     }
 
     function refreshGeneratorRoles() {
+      const previousRole = genRole.value;
       genRole.innerHTML = "";
       if (roleList.length === 0) {
         const o = document.createElement("option");
         o.value = ""; o.textContent = "(pt/ 下无角色)";
         genRole.appendChild(o);
-        genEmotion.innerHTML = "";
-        const o2 = document.createElement("option");
-        o2.value = ""; o2.textContent = "(无)";
-        genEmotion.appendChild(o2);
+        fillEmotionOptions($('genEmotionOptions'), '');
         updateGeneratorMode();
         return;
       }
@@ -2342,22 +2351,13 @@
         o.value = r; o.textContent = r;
         genRole.appendChild(o);
       });
+      if (roleList.includes(previousRole)) genRole.value = previousRole;
       onGeneratorRoleChange();
     }
 
     function onGeneratorRoleChange() {
       const role = genRole.value;
-      const emos = rolesData[role] || [];
-      genEmotion.innerHTML = "";
-      const defaultOption = document.createElement("option");
-      defaultOption.value = "";
-      defaultOption.textContent = "默认 · 平静";
-      genEmotion.appendChild(defaultOption);
-      emos.filter(e => e !== "平静").forEach(e => {
-          const o = document.createElement("option");
-          o.value = e; o.textContent = e;
-          genEmotion.appendChild(o);
-      });
+      fillEmotionOptions($('genEmotionOptions'), role);
       // 给生成器的角色下拉也着色
       applyRoleColorVars(genRole, role);
       applyRoleColorVars(genEmotion, role);
@@ -2401,7 +2401,7 @@
       if (!libraryLoaded || genBtn.disabled) return;
       const synthesis_mode = generatorMode;
       const role = synthesis_mode === 'design' ? '' : genRole.value;
-      const emotion = genEmotion.value || "平静";
+      const emotion = genEmotion.value.trim() || "平静";
       const text = genText.value.trim();
       const language = genLanguage.value;
       const instruct = synthesis_mode === 'design' ? $('genInstruct').value.trim() : '';
@@ -2478,6 +2478,7 @@
       const clip = editingClip;
       const previous = clipMetadata(clip);
       const changes = {title: $('editTitle').value.trim(), text: $('editText').value,
+        emotion: clip.synthesis_mode !== 'design' ? $('editEmotion').value.trim() || '平静' : clip.emotion,
         language: $('editLanguage').value, instruct: clip.synthesis_mode === 'design' ? $('editInstruct').value.trim() : ''};
       $('saveEdit').disabled = true;
       try {

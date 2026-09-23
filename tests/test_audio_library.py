@@ -86,6 +86,19 @@ def test_design_crud_export_and_reopen(api):
     assert client.get("/api/clips/" + key).status_code == 404
 
 
+@pytest.mark.parametrize(
+    "emotion, expected",
+    [("期待", "期待"), (" 愤怒 ", "愤怒"), ("", "平静"), (None, "平静")],
+)
+def test_edit_emotion_persists(api, emotion, expected):
+    client, server, _ = api
+    record = client.post("/api/clips", json={"role": "Test"}).json()
+    response = client.patch("/api/clips/" + record["id"], json={"emotion": emotion})
+    assert response.status_code == 200
+    assert response.json()["emotion"] == expected
+    assert AudioLibrary(server.OUT_DIR).get(record["id"])["emotion"] == expected
+
+
 def test_legacy_import_and_missing_file(api):
     client, server, _ = api
     server.OUT_DIR.mkdir()
