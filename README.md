@@ -24,8 +24,8 @@
 ### 1. 获取项目
 
 ```bash
-git clone https://github.com/NOTF-API/qwen3-tts-base-web.git
-cd qwen3-tts-base-web
+git clone https://github.com/NOTF-API/qwen3-tts-web.git
+cd qwen3-tts-web
 ```
 
 已有项目时，直接在项目目录执行下面的命令。
