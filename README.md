@@ -13,7 +13,7 @@
 ![Linux](https://img.shields.io/badge/Linux-NVIDIA_CUDA-76B900?logo=linux&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)
 
-[快速开始](#快速开始) · [常用命令](#常用命令) · [功能与使用](#功能与使用) · [运行要求](#运行要求) · [接口文档](docs/audio-library.md)
+[快速开始](#快速开始) · [常用命令](#常用命令) · [功能与使用](#功能与使用) · [运行要求](#运行要求)
 
 </div>
 
@@ -116,7 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 serv
 
 ### 浏览器录音
 
-在「克隆音色」页面点击「开始录音」，允许麦克风权限，结束时点击「停止录音」。录音会进入已有波形界面，可拖动选区或填写起止时间，试听后「确认裁切」，再生成角色 `.pt`。录制最长 2 分钟，取消录音保留原参考音频。
+在「克隆音色」页面选择麦克风，点击「开始录音」并允许权限，录制时显示实时输入波形。结束时点击「停止录音」，可拖动选区或填写起止时间，试听后「确认裁切」，再生成角色 `.pt`。录制最长 2 分钟；无声时会提示检查设备，不保存全静音录音；取消录音保留原参考音频。
 
 使用 `http://localhost:8001/maker` 或 HTTPS 地址录音；普通局域网 HTTP 地址不提供麦克风访问。权限被拒绝时，请在浏览器站点设置中允许麦克风后重试。录音和裁切先在浏览器内处理，只有点击「生成 .pt 文件」才上传裁切后的 WAV；关闭页面前未提交的录音不会保留。
 
@@ -166,8 +166,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 serv
 │   ├── constraints/           # macOS / CUDA 固定依赖分支
 │   └── web/                   # 桌面 Web 界面
 ├── scripts/                   # 跨平台引导与启动脚本
-├── tests/                     # API 与桌面浏览器回归
-├── docs/                      # 语音库与 VoiceDesign 接口说明
 ├── models/                    # 模型，不提交
 ├── pt/                        # 角色音色，不提交
 ├── uploads/                   # 上传音频，不提交
@@ -177,13 +175,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 serv
 
 管理环境为 `.venv-tools/`，推理环境为 `.venv/`，日志位于 `.logs/`。旧数据目录不迁移、不删除，新音频统一写入 `output/`。
 
-## 开发与文档
+## 项目配置
 
-- [语音库 CRUD、批量导出与 VoiceDesign API](docs/audio-library.md)
-- [依赖、打包与测试配置](pyproject.toml)
+- [依赖与打包配置](pyproject.toml)
 - [配置项示例](config.example.toml)
 
-Python 测试使用模拟模型与临时目录，不要求 GPU；桌面浏览器回归使用 Playwright。运行方式见 [测试说明](docs/audio-library.md#验证)。模拟测试不替代 VoiceDesign 的真实 MPS / CUDA 验收。
+服务启动后可访问 `/docs` 查看交互式 HTTP API。
 
 ## 许可与致谢
 

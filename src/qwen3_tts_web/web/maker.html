@@ -539,6 +539,11 @@
         .recorder-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
         .record-time { font-variant-numeric: tabular-nums; min-width: 48px; color: #d9dde1; }
         .record-state { flex: 1; min-width: 140px; color: #a0a8b0; font-size: 12px; overflow-wrap: anywhere; }
+        .mic-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+        .mic-controls label { white-space: nowrap; font-size: 12px; color: #b5bcc4; }
+        .mic-controls select { flex: 1; min-width: 0; padding: 8px; color: #ddd; background: #171a1d; border: 1px solid #34383d; border-radius: 4px; }
+        #liveWave { display: block; width: 100%; height: 90px; background: #0b0d0f; border: 1px solid #30363b; border-radius: 4px; margin-bottom: 12px; }
+        #liveWave[hidden] { display: none; }
         .recorder-bar[data-recording="true"] .record-time { color: #f18e8e; }
         #recordStart { border-color: #744044; color: #f1a2a2; }
         #drop[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
@@ -563,13 +568,19 @@
         <!-- ============ 01 · 参考音频 ============ -->
         <section class="card">
             <h2>01 · 参考音频</h2>
+            <div class="mic-controls">
+                <label for="microphone">麦克风</label>
+                <select id="microphone"><option value="">系统默认麦克风</option></select>
+                <button type="button" class="sel-btn" id="refreshMicrophones" title="刷新麦克风列表" aria-label="刷新麦克风列表">↻</button>
+            </div>
             <div class="recorder-bar" id="recorderBar">
                 <button type="button" class="sel-btn" id="recordStart">开始录音</button>
                 <button type="button" class="sel-btn" id="recordStop" disabled>停止录音</button>
                 <button type="button" class="sel-btn" id="recordCancel" disabled>取消录音</button>
                 <span class="record-time" id="recordTime" aria-label="录音时长">00:00</span>
-                <span class="record-state" id="recordStatus" role="status">麦克风就绪 · 最长 2 分钟</span>
+                <span class="record-state" id="recordStatus" role="status">尚未连接麦克风 · 最长 2 分钟</span>
             </div>
+            <canvas id="liveWave" width="720" height="90" aria-label="麦克风实时输入波形" hidden></canvas>
 
             <div class="drop" id="drop">
                 <input type="file" id="file" accept="audio/*">
@@ -682,6 +693,7 @@
         const preciseBox = $("preciseBox");
         const recordStart = $('recordStart'), recordStop = $('recordStop'), recordCancel = $('recordCancel');
         const recordStatus = $('recordStatus'), recordTime = $('recordTime');
+        const microphone = $('microphone'), liveWave = $('liveWave');
 
         // ============================================================
         // 状态
@@ -695,16 +707,60 @@
         let loadVersion = 0;
         let submitting = false;
         const RECORD_LIMIT = 120;
+        let recorderModule = null;
 
         function recordingUnavailable() {
             if (!window.isSecureContext) return '录音需要 HTTPS 或 localhost；当前地址可使用文件上传。';
-            if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return '当前浏览器不支持录音，请使用文件上传。';
+            if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) return '当前浏览器不支持录音，请使用文件上传。';
             return '';
+        }
+
+        async function refreshMicrophones() {
+            if (!navigator.mediaDevices?.enumerateDevices) return;
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const selected = microphone.value;
+                microphone.replaceChildren(new Option('系统默认麦克风', ''));
+                devices.filter(device => device.kind === 'audioinput' && device.deviceId).forEach((device, index) => {
+                    microphone.add(new Option(device.label || '麦克风 ' + (index + 1), device.deviceId));
+                });
+                if ([...microphone.options].some(option => option.value === selected)) microphone.value = selected;
+            } catch (error) {
+                if (!capture) recordStatus.textContent = '无法读取麦克风列表：' + error.message;
+            }
+        }
+
+        function drawLiveWave(session) {
+            if (capture !== session || !session.recording) return;
+            const width = Math.max(1, Math.round(liveWave.clientWidth * devicePixelRatio));
+            const height = Math.round(90 * devicePixelRatio);
+            if (liveWave.width !== width || liveWave.height !== height) { liveWave.width = width; liveWave.height = height; }
+            const painter = liveWave.getContext('2d');
+            painter.fillStyle = '#0b0d0f'; painter.fillRect(0, 0, width, height);
+            painter.strokeStyle = session.recentPeak > .001 ? '#78e59b' : '#69747f';
+            painter.lineWidth = 1.5 * devicePixelRatio;
+            painter.beginPath();
+            const samples = session.latest;
+            for (let x = 0; x < width; x++) {
+                const value = samples?.[Math.floor(x / width * samples.length)] || 0;
+                const y = height / 2 - Math.max(-1, Math.min(1, value * 4)) * height * .45;
+                if (x === 0) painter.moveTo(x, y); else painter.lineTo(x, y);
+            }
+            painter.stroke();
+            session.raf = requestAnimationFrame(() => drawLiveWave(session));
         }
 
         function releaseCapture(session) {
             clearInterval(session.timer);
+            clearTimeout(session.stopTimeout);
+            cancelAnimationFrame(session.raf);
+            session.recording = false;
+            session.source?.disconnect();
+            session.node?.disconnect();
+            session.mute?.disconnect();
+            session.node?.port.close();
             session.stream?.getTracks().forEach(track => track.stop());
+            session.chunks.length = 0;
         }
 
         function cancelRecording(message = '已取消录音') {
@@ -712,23 +768,44 @@
             if (!session) return;
             capture = null;
             session.cancelled = true;
-            if (session.recorder?.state !== 'inactive' && session.recorder) {
-                try { session.recorder.stop(); } catch (_) { }
-            }
             releaseCapture(session);
+            liveWave.hidden = true;
             recordStatus.textContent = message;
             updateButtons();
         }
 
         function stopRecording() {
             const session = capture;
-            if (!session || session.recorder?.state !== 'recording') return;
+            if (!session?.recording || session.stopping) return;
             session.stopping = true;
+            clearInterval(session.timer);
             recordStatus.textContent = '正在整理录音…';
-            try { session.recorder.stop(); }
-            catch (error) { cancelRecording('停止录音失败：' + error.message); }
-            releaseCapture(session);
+            session.node.port.postMessage('stop');
+            // Drain the worklet's final PCM block before releasing the stream.
+            session.stopTimeout = setTimeout(() => {
+                if (capture === session) cancelRecording('录音采集中断，未保存；请检查麦克风后重试。');
+            }, 3000);
             updateButtons();
+        }
+
+        function finishRecording(session) {
+            if (capture !== session) return;
+            try {
+                if (!session.frames || session.peak < .00001) throw new Error('没有采集到声音，请检查系统麦克风权限、设备静音或更换麦克风。');
+                const buffer = getCtx().createBuffer(1, session.frames, session.sampleRate);
+                const samples = buffer.getChannelData(0);
+                let offset = 0;
+                for (const chunk of session.chunks) { samples.set(chunk, offset); offset += chunk.length; }
+                setLoadedAudio(buffer, 'recording-' + Date.now() + '.wav');
+                recordStatus.textContent = session.peak < .001 ? '录音音量很低，请先试听或更换麦克风重录。' : '录音已就绪 · 待裁切确认';
+            } catch (error) {
+                recordStatus.textContent = '录音失败：' + error.message;
+            } finally {
+                releaseCapture(session);
+                capture = null;
+                liveWave.hidden = true;
+                updateButtons();
+            }
         }
 
         async function startRecording() {
@@ -736,56 +813,63 @@
             const unavailable = recordingUnavailable();
             if (unavailable) { recordStatus.textContent = unavailable; return; }
             stopPreview();
-            const session = {chunks: [], stream: null, recorder: null, cancelled: false};
+            const session = {chunks: [], frames: 0, peak: 0, recentPeak: 0, lastSound: performance.now(), stream: null, cancelled: false};
             capture = session;
             recordTime.textContent = '00:00';
             recordStatus.textContent = '等待麦克风授权…';
             updateButtons();
             try {
-                session.stream = await navigator.mediaDevices.getUserMedia({audio: true, video: false});
+                // Resume from the button gesture, before waiting for permission.
+                const ctx = getCtx();
+                await ctx.resume();
+                if (capture !== session) return;
+                if (ctx.state !== 'running') throw new Error('浏览器音频未启动，请再次点击开始录音');
+                session.stream = await navigator.mediaDevices.getUserMedia({audio: {
+                    ...(microphone.value ? {deviceId: {exact: microphone.value}} : {}),
+                    echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+                }, video: false});
                 // Permission can resolve after cancel/navigation. Never keep that stream alive.
                 if (capture !== session) { releaseCapture(session); return; }
-                const mimeType = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus']
-                    .find(type => MediaRecorder.isTypeSupported(type));
-                const recorder = new MediaRecorder(session.stream, mimeType ? {mimeType} : {});
-                session.recorder = recorder;
-                recorder.ondataavailable = event => {
-                    if (!session.cancelled && event.data.size) session.chunks.push(event.data);
+                refreshMicrophones();
+                if (!recorderModule) recorderModule = ctx.audioWorklet.addModule('/web/recorder-worklet.js').catch(error => { recorderModule = null; throw error; });
+                await recorderModule;
+                if (capture !== session) { releaseCapture(session); return; }
+                session.sampleRate = ctx.sampleRate;
+                session.node = new AudioWorkletNode(ctx, 'reference-recorder', {processorOptions: {maxSeconds: RECORD_LIMIT}});
+                session.node.onprocessorerror = () => {
+                    if (capture === session) cancelRecording('音频采集失败，请重试。');
                 };
-                recorder.onerror = event => {
-                    if (capture === session) cancelRecording('录音失败：' + (event.error?.message || '设备中断，请重试'));
-                };
-                recorder.onstop = async () => {
-                    releaseCapture(session);
+                session.node.port.onmessage = ({data}) => {
                     if (capture !== session) return;
-                    session.stopping = true;
-                    recordStatus.textContent = '正在读取录音…';
-                    updateButtons();
-                    try {
-                        const type = recorder.mimeType || session.chunks[0]?.type || 'audio/webm';
-                        const blob = new Blob(session.chunks, {type});
-                        session.chunks.length = 0;
-                        if (!blob.size) throw new Error('未录到音频，请重新录制');
-                        const extension = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
-                        const file = new File([blob], 'recording-' + Date.now() + '.' + extension, {type});
-                        const loaded = await loadAudio(file, session);
-                        if (capture === session && loaded) recordStatus.textContent = '录音已就绪 · 待裁切确认';
-                    } catch (error) {
-                        if (capture === session) recordStatus.textContent = '录音处理失败：' + error.message;
-                    } finally {
-                        if (capture === session) capture = null;
-                        updateButtons();
-                    }
+                    if (data.type === 'samples') {
+                        session.chunks.push(data.samples);
+                        session.frames += data.samples.length;
+                        session.latest = data.samples;
+                        session.recentPeak = data.samples.reduce((peak, value) => Math.max(peak, Math.abs(value)), 0);
+                        session.peak = Math.max(session.peak, session.recentPeak);
+                        if (session.recentPeak > .001) session.lastSound = performance.now();
+                    } else if (data.type === 'stopped' || data.type === 'limit') finishRecording(session);
                 };
+                session.source = ctx.createMediaStreamSource(session.stream);
+                session.mute = ctx.createGain();
+                session.mute.gain.value = 0;
+                session.source.connect(session.node).connect(session.mute).connect(ctx.destination);
                 session.stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => {
                     if (capture === session && !session.stopping) stopRecording();
                 }));
-                recorder.start(250);
+                session.recording = true;
                 session.started = performance.now();
-                recordStatus.textContent = '录音中';
+                session.deviceLabel = session.stream.getAudioTracks()[0]?.label || '麦克风';
+                recordStatus.textContent = '录音中 · ' + session.deviceLabel;
+                liveWave.hidden = false;
+                drawLiveWave(session);
                 session.timer = setInterval(() => {
                     const seconds = Math.floor((performance.now() - session.started) / 1000);
                     recordTime.textContent = String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
+                    recordStatus.textContent = performance.now() - session.lastSound > 3000
+                        ? '未检测到声音，请检查麦克风是否静音或选择其他设备。'
+                        : '录音中 · ' + session.deviceLabel;
+                    if (ctx.state !== 'running') { cancelRecording('浏览器音频已暂停，录音中断，请重试。'); return; }
                     if (seconds >= RECORD_LIMIT) stopRecording();
                 }, 200);
                 updateButtons();
@@ -793,10 +877,12 @@
                 releaseCapture(session);
                 if (capture !== session) return;
                 capture = null;
+                liveWave.hidden = true;
                 const messages = {
                     NotAllowedError: '麦克风权限被拒绝，请在浏览器站点设置中允许后重试。',
                     NotFoundError: '没有找到麦克风，请连接设备后重试。',
                     NotReadableError: '麦克风无法使用，可能被其他应用占用。',
+                    OverconstrainedError: '所选麦克风不可用，请刷新设备列表后重新选择。',
                 };
                 recordStatus.textContent = messages[error.name] || '录音失败：' + error.message;
                 updateButtons();
@@ -806,6 +892,8 @@
         recordStart.addEventListener('click', startRecording);
         recordStop.addEventListener('click', stopRecording);
         recordCancel.addEventListener('click', () => cancelRecording());
+        $('refreshMicrophones').addEventListener('click', refreshMicrophones);
+        navigator.mediaDevices?.addEventListener('devicechange', refreshMicrophones);
         window.addEventListener('pagehide', () => { cancelRecording(); stopPreview(); });
 
         // 选区（始终针对整段音频的秒数）
@@ -825,6 +913,7 @@
         let previewOffset = 0;
         let previewRaf = null;
         let isPreviewing = false;
+        let previewVersion = 0;
 
         function getCtx() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -907,27 +996,8 @@
                 const decoded = await ctx.decodeAudioData(ab);
                 if (version !== loadVersion || (session && capture !== session)) return false;
                 if (!decoded.length || !Number.isFinite(decoded.duration)) throw new Error('音频为空或无效');
-                audioBuffer = decoded;
-                audioName = file.name;
-                statusEl.textContent = '';
-                statusEl.className = 'status';
+                setLoadedAudio(decoded, file.name);
                 if (!session) recordStatus.textContent = recordingUnavailable() || '已载入音频文件';
-
-                selection.start = 0;
-                selection.end = audioBuffer.duration;
-                cropLocked = false;
-
-                fileNameEl.textContent = file.name;
-                fileNameEl.title = file.name;
-                fileDurationEl.textContent = fmtTime(audioBuffer.duration);
-                waveBox.classList.add("show");
-
-                startIn.max = audioBuffer.duration.toFixed(2);
-                endIn.max = audioBuffer.duration.toFixed(2);
-
-                syncInputsFromSel();
-                setMode(false);
-                updateButtons();
                 return true;
             } catch (e) {
                 console.error(e);
@@ -939,6 +1009,21 @@
                 loadingAudio = false;
                 updateButtons();
             }
+        }
+
+        function setLoadedAudio(buffer, name) {
+            audioBuffer = buffer;
+            audioName = name;
+            statusEl.textContent = '';
+            statusEl.className = 'status';
+            selection = {start: 0, end: buffer.duration};
+            fileNameEl.textContent = name;
+            fileNameEl.title = name;
+            fileDurationEl.textContent = fmtTime(buffer.duration);
+            waveBox.classList.add('show');
+            startIn.max = endIn.max = buffer.duration.toFixed(2);
+            syncInputsFromSel();
+            setMode(false);
         }
 
         function resetAll() {
@@ -1254,8 +1339,10 @@
         // ============================================================
 
         function stopPreview() {
+            ++previewVersion;
             if (previewSource) {
                 try { previewSource.stop(); } catch (_) { }
+                previewSource.disconnect();
                 previewSource = null;
             }
             if (previewRaf) {
@@ -1266,11 +1353,17 @@
             updatePreviewBtn();
         }
 
-        function startPreview() {
-            if (!audioBuffer) return;
+        async function startPreview() {
+            if (!audioBuffer || capture || loadingAudio || submitting) return;
             stopPreview();
+            const version = previewVersion;
             const ctx = getCtx();
-            if (ctx.state === "suspended") ctx.resume();
+            isPreviewing = true;
+            updatePreviewBtn();
+            try {
+            await ctx.resume();
+            if (version !== previewVersion) return;
+            if (ctx.state !== 'running') throw new Error('浏览器音频输出未启动，请再次点击试听');
 
             const src = ctx.createBufferSource();
             src.buffer = audioBuffer;
@@ -1281,6 +1374,7 @@
             previewStartCtxTime = ctx.currentTime;
             src.start(0, selection.start, dur);
             src.onended = () => {
+                src.disconnect();
                 if (previewSource === src) {
                     previewSource = null;
                     isPreviewing = false;
@@ -1292,6 +1386,12 @@
             isPreviewing = true;
             updatePreviewBtn();
             drawWaveform();
+            } catch (error) {
+                if (version === previewVersion) {
+                    stopPreview();
+                    setStatus('试听失败：' + error.message, 'err');
+                }
+            }
         }
 
         function updatePreviewBtn() {
@@ -1420,9 +1520,11 @@
             const hasAudio = !!audioBuffer;
             const busy = !!capture || loadingAudio || submitting;
             recordStart.disabled = busy || !!recordingUnavailable();
-            recordStop.disabled = !capture || capture.recorder?.state !== 'recording' || capture.stopping;
+            recordStop.disabled = !capture?.recording || capture.stopping;
             recordCancel.disabled = !capture;
-            $('recorderBar').dataset.recording = String(!!capture && capture.recorder?.state === 'recording');
+            microphone.disabled = busy;
+            $('refreshMicrophones').disabled = busy;
+            $('recorderBar').dataset.recording = String(!!capture?.recording);
             fileInput.disabled = busy;
             drop.setAttribute('aria-disabled', String(busy));
             clearBtn.disabled = busy;
@@ -1595,6 +1697,7 @@
         });
 
         if (recordingUnavailable()) recordStatus.textContent = recordingUnavailable();
+        refreshMicrophones();
         loadLib();
         updateSelInfo();
         updateButtons();

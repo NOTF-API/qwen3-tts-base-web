@@ -24,11 +24,6 @@ server = [
   "pydantic>=2.10,<3", "python-multipart>=0.0.20,<1",
   "soundfile>=0.13,<1", "numpy>=1.26,<3",
 ]
-test = [
-  "pytest>=8,<9", "pytest-asyncio>=0.25,<1", "httpx>=0.28,<1",
-  "fastapi>=0.115,<1", "python-multipart>=0.0.20,<1",
-  "soundfile>=0.13,<1", "numpy>=1.26,<3", "build>=1.2,<2",
-]
 
 [project.scripts]
 qwen3-tts-web = "qwen3_tts_web.cli:main"
@@ -37,10 +32,4 @@ qwen3-tts-web = "qwen3_tts_web.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-qwen3_tts_web = ["web/*.html", "constraints/*.txt"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-markers = ["hardware: requires a real GPU, installed runtime and local model"]
+qwen3_tts_web = ["web/*.html", "web/*.js", "constraints/*.txt"]

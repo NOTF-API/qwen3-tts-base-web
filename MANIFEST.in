@@ -1,6 +1,4 @@
 include LICENSE README.md config.example.toml main.py
 recursive-include scripts *.sh *.ps1 *.cmd *.py
-recursive-include docs *.md
-recursive-include tests *.py *.cjs
-recursive-include src/qwen3_tts_web/web *.html
+recursive-include src/qwen3_tts_web/web *.html *.js
 recursive-include src/qwen3_tts_web/constraints *.txt
